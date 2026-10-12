@@ -60,14 +60,18 @@ one JSON file per planet:
 
 ## Setup on the PC (once)
 
-The torch from `requirements.txt` is CPU-only. Swap it for the CUDA build so the big SAC runs
-can use the RTX 3050:
+Make a Python 3.13 venv in this folder. Install torch first, from the CUDA index, so SB3 doesn't
+pull in the CPU-only build:
 
 ```
-pip uninstall -y torch
+py -3.13 -m venv .venv
+.\.venv\Scripts\activate
 pip install torch==2.11.0 --index-url https://download.pytorch.org/whl/cu128
+pip install stable-baselines3==2.8.0 "gymnasium[box2d]==1.2.3" "numpy~=2.4.0" pandas==3.0.2 matplotlib==3.10.8
 python -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_device_name(0))"
 ```
+
+Activate the venv (`.\.venv\Scripts\activate`) in every new terminal before running the commands below.
 
 The last line should print `True NVIDIA GeForce RTX 3050`. If it prints `False`, everything
 still works, but it all runs on the CPU and takes longer.
@@ -75,7 +79,6 @@ still works, but it all runs on the CPU and takes longer.
 ## 1. Quick check (about 5 minutes)
 
 ```
-cd research
 python driver.py train --quick
 python driver.py test --quick --log
 python driver.py plots --quick
@@ -86,25 +89,50 @@ and 2 test planets per condition.
 
 - Each run's `done` line shows its device and its speed in steps per second. The SAC 256x256 runs
   should say `on cuda`.
-- A full 4000-episode run is roughly 1-1.3 million steps. At 150 steps/s, for example, that's
-  about 2 hours per run.
+- A full 4000-episode SAC run is roughly 1.5-2.4 million steps: early landers hover until the
+  1000-step limit, and even good ones take 300-400 steps to land in the wind.
 - Delete the `quick` folder afterwards.
 
-## 2. Train (roughly 15-20 hours)
+## 2. Train (about 40 hours)
 
 ```
-python driver.py train
+python driver.py train --gpu-workers 0
 ```
 
-- Several runs train at once. SAC 256x256 runs go on the GPU, 2 at a time. Everything else
-  runs on the CPU, using all threads but one.
-- Once the CPU runs out of its own work, it helps with SAC 256x256 runs that are still waiting.
+- 11 runs train at once, one per CPU thread, longest runs first.
+- `--gpu-workers 0` keeps everything on the CPU. On this laptop the GPU is no faster than a CPU thread
+  once the CPU is busy. Without the flag, the 12 SAC 256x256 runs queue for 2 GPU slots, which
+  takes much longer.
 - To change how many runs train at once, use `--cpu-workers N` and `--gpu-workers N`.
-- A progress line prints at every stage: episode, total steps, mean return of the last 100 landings
-  and minutes so far.
-- Keep the PC awake: Settings > System > Power > Screen and sleep > "Never" while plugged in.
-- **Ctrl+C** stops everything. Finished runs are kept. Run the same command again to carry on:
-  finished runs are skipped and unfinished ones start over.
+  - More than 12, the CPU's thread count, doesn't make anything faster.
+  - Each SAC run uses about 0.6-0.7 GB of RAM, so 11 runs at once nearly fill the 16 GB.
+  - Use 12 only with other apps closed.
+- A line prints when a run reaches each stage: episode, total steps, mean return of the last 100
+  landings and minutes so far.
+- To see how far the whole study has got, open a second PowerShell window and run:
+  ```
+  cd C:\Users\gurka\Desktop\RL-IA
+  .\.venv\Scripts\python driver.py progress
+  ```
+  It redraws one line every 30 seconds, for example
+  `[###########-------------------]  37.4%  27 of 72 runs done  about 25 h left`.
+  - It only reads `logs/` and checks which models exist. Ctrl+C there closes it without touching
+    training.
+  - The % counts each run by how long it takes, so it moves at about the same speed all the way
+    through. A SAC 256x256 run counts 12 times as much as a PPO run.
+  - The time left comes from the same rough speeds, so treat it as an estimate.
+  - It shows 0% until the first stage, about 45 minutes in. After that it lags about 1% behind,
+    because training writes its logs in chunks of about 200 landings.
+  - It doesn't load torch, so it needs only a few tens of MB of RAM.
+  - If you train with `--cpu-workers N`, pass the same `--cpu-workers N` so the time left is right.
+- Before you start:
+  - keep the laptop plugged in, with sleep set to "Never" on mains power;
+  - pause Windows Update for a week (Settings > Windows Update > Pause updates), because it restarts the
+    PC at night.
+- Run it in its own PowerShell window, not VS Code's terminal, so closing VS Code doesn't stop it.
+- **Ctrl+C**, a crash or a restart stops everything. Run the same command again to carry on:
+  finished runs are skipped, and unfinished ones pick up from their last saved stage. Only the work
+  since that stage is lost.
 
 ## 3. Test (about 10-20 minutes)
 
@@ -161,22 +189,23 @@ on from its 4000 file instead of starting over:
 ## Files
 
 ```
-research/
-  driver.py      study settings, train_all(), test_all()
+RL-IA/
+  driver.py      study settings, train_all(), test_all(), show_progress()
+  names.py       model names and file paths (no torch, so progress stays small)
   trainer.py     GaussPlanetWrapper, train()
   testing.py     make_envs(), test()
   plots.py       charts
   resources/
     ppo/, sac/   sac_lr3e-4_net256x256_seed0_ep1000.zip  (algorithm, lr, size, seed, training episodes)
-      continue/  SAC replay buffers and planet-generator states, needed only to train past the last stage
+      continue/  SAC replay buffers and planet-generator states, saved at every stage so a run can carry on
     envs/        heavy_wind_07_g-10.00_wind17.3_turb1.84_seed735120.json
   logs/          one CSV per run: every training landing with its return and planet
   results/       test_results.csv, summary.csv, peaks.csv
   plots/
 ```
 
-Disk use is about 0.5 GB of models, plus about 3 GB of SAC replay buffers. If you won't train
-past 4000 episodes, you can delete `resources/sac/continue/*.pkl`.
+Disk use is about 0.5 GB of models, plus about 3 GB of SAC replay buffers. Once training has
+finished, and if you won't train past 4000 episodes, you can delete `resources/sac/continue/*.pkl`.
 
 ### `results/test_results.csv` (one row per test landing)
 

@@ -16,8 +16,8 @@ from matplotlib.colors import LinearSegmentedColormap
 from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
 
+from names import lr_tag
 from testing import CONDITIONS, SOLVED
-from trainer import lr_tag
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 
