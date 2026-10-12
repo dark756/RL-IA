@@ -16,7 +16,8 @@ import torch
 from stable_baselines3 import PPO, SAC
 from stable_baselines3.common.callbacks import BaseCallback
 
-ROOT = os.path.dirname(os.path.abspath(__file__))
+from names import ROOT, finished, model_name, stage_path
+
 ALGOS = {"ppo": PPO, "sac": SAC}
 MAX_STEPS = 1000  # LunarLander ends a landing after 1000 steps
 
@@ -40,7 +41,7 @@ class GaussPlanetWrapper(gym.Wrapper):
         self.rng_state = self.rng.bit_generator.state
 
     def reset(self, **kwargs):
-        self.rng_state = self.rng.bit_generator.state  # saved at the end, so a longer run carries on from this planet
+        self.rng_state = self.rng.bit_generator.state  # saved at each stage, so a run carries on from this planet
         self.gravity = draw(lambda: self.rng.normal(GRAVITY_MEAN, GRAVITY_SPREAD), GRAVITY_LIMITS)
         self.wind = draw(lambda: abs(self.rng.normal(0.0, WIND_SPREAD)), WIND_LIMITS)
         self.turbulence = draw(lambda: abs(self.rng.normal(0.0, TURBULENCE_SPREAD)), TURBULENCE_LIMITS)
@@ -64,11 +65,12 @@ def draw(sample, limits):
 
 
 class StageSaver(BaseCallback):
-    """Counts finished landings, logs each one, saves the weights at every stage and stops after the last."""
+    """Counts finished landings, logs each one, saves weights and progress at every stage, stops after the last."""
 
-    def __init__(self, name, folder, stages, episodes, log):
+    def __init__(self, name, folder, stages, episodes, log, save_progress):
         super().__init__()
         self.name, self.folder, self.stages, self.log = name, folder, stages, log
+        self.save_progress = save_progress
         self.episodes = episodes  # landings finished so far
         self.recent = deque(maxlen=100)
         self.start = time.time()
@@ -85,29 +87,11 @@ class StageSaver(BaseCallback):
             self.recent.append(ret)
             if self.episodes in self.stages:
                 self.model.save(os.path.join(self.folder, f"{self.name}_ep{self.episodes}"))
+                self.save_progress(self.episodes)
                 print(f"{self.name}  episode {self.episodes:>5}  steps {self.num_timesteps:>9,}  "
                       f"last 100 landings {np.mean(self.recent):7.1f}  {(time.time() - self.start) / 60:6.1f} min",
                       flush=True)
         return self.episodes < self.stages[-1]
-
-
-def lr_tag(lr):
-    """0.0003 -> '3e-4'"""
-    mantissa, exponent = f"{lr:e}".split("e")
-    return f"{mantissa.rstrip('0').rstrip('.')}e{int(exponent)}"
-
-
-def model_name(algo, lr, size, seed):
-    """e.g. sac_lr3e-4_net256x256_seed0 (the stage files add _ep1000)"""
-    return f"{algo}_lr{lr_tag(lr)}_net{'x'.join(map(str, size))}_seed{seed}"
-
-
-def stage_path(algo, lr, size, seed, episodes, root=ROOT):
-    return os.path.join(root, "resources", algo, f"{model_name(algo, lr, size, seed)}_ep{episodes}.zip")
-
-
-def finished(algo, lr, size, seed, stages, root=ROOT):
-    return all(os.path.exists(stage_path(algo, lr, size, seed, stage, root)) for stage in stages)
 
 
 def pick_device(algo, size):
@@ -118,8 +102,8 @@ def pick_device(algo, size):
 def train(algo, lr, size, seed, stages, device="cpu", root=ROOT):
     """Trains one model and saves resources/<algo>/<name>_ep<stage>.zip at every stage.
 
-    A run whose stage files all exist is skipped. A run that has already reached an earlier last
-    stage carries on from it (e.g. after 8000 is added to the stages) instead of starting over."""
+    A run whose stage files all exist is skipped. A run that already reached a stage carries on from
+    it instead of starting over: after a restart cut it short, or after 8000 is added to the stages."""
     stages = sorted(stages)
     name = model_name(algo, lr, size, seed)
     if finished(algo, lr, size, seed, stages, root):
@@ -154,7 +138,7 @@ def train(algo, lr, size, seed, stages, device="cpu", root=ROOT):
             model.load_replay_buffer(buffer_file)
         env.rng.bit_generator.state = state["rng"]
         with open(log_file, newline="", encoding="utf-8") as f:  # drop rows from an earlier attempt that was cut short
-            rows = [row for row in csv.reader(f) if row[0] == "episode" or int(row[0]) <= start]
+            rows = list(csv.reader(f))[:start + 1]  # header + episodes 1..start (a crash can leave half a row)
         with open(log_file, "w", newline="", encoding="utf-8") as f:
             csv.writer(f).writerows(rows)
         print(f"{name}  carrying on from episode {start}", flush=True)
@@ -168,16 +152,25 @@ def train(algo, lr, size, seed, stages, device="cpu", root=ROOT):
         log = csv.writer(f)
         if not start:
             log.writerow(["episode", "steps", "return", "length", "gravity", "wind", "turbulence"])
-        saver = StageSaver(name, folder, stages, start, log)
+
+        def save_progress(episodes):
+            """What the run needs to carry on from this stage, so a restart only loses the work since it."""
+            f.flush()
+            if os.path.exists(state_file):
+                os.remove(state_file)  # a crash mid-save then means starting over, never a mismatched buffer
+            if algo == "sac":
+                model.save_replay_buffer(buffer_file + ".tmp")
+                os.replace(buffer_file + ".tmp", buffer_file)
+            seconds = time.time() - started + (state["seconds"] if state else 0)
+            with open(state_file + ".tmp", "w", encoding="utf-8") as g:
+                json.dump({"episodes": episodes, "steps": model.num_timesteps, "seconds": round(seconds),
+                           "device": device, "rng": env.rng_state}, g, indent=1)
+            os.replace(state_file + ".tmp", state_file)
+
+        saver = StageSaver(name, folder, stages, start, log, save_progress)
         model.learn(total_timesteps=MAX_STEPS * (stages[-1] - start + 1), callback=saver,
                     reset_num_timesteps=not start)
     seconds = time.time() - started + (state["seconds"] if state else 0)
-
-    if algo == "sac":
-        model.save_replay_buffer(buffer_file)
-    with open(state_file, "w", encoding="utf-8") as f:
-        json.dump({"episodes": saver.episodes, "steps": model.num_timesteps, "seconds": round(seconds),
-                   "device": device, "rng": env.rng_state}, f, indent=1)
     env.close()
     print(f"{name}  done: {saver.episodes} episodes, {model.num_timesteps:,} steps, {seconds / 60:.1f} min "
           f"on {device} ({model.num_timesteps / seconds:.0f} steps/s)", flush=True)
