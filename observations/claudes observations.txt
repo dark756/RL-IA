@@ -1,0 +1,184 @@
+CLAUDE'S OBSERVATIONS
+=====================
+
+A review of "my observations.txt" (in this folder), written on 2026-10-13 after the study finished.
+Each section takes one of your points, says what holds and what doesn't, and suggests a wording.
+
+Sources
+- results/test_results.csv, results/summary.csv, results/peaks.csv and the charts in plots/.
+- Two things were worked out for this review and aren't saved in results/:
+  - the importance shares recomputed without the unstable PPO corner, with variance_shares() from plots.py;
+  - estimated minutes of training to reach each stage. Each run's total time ("seconds" in its state file)
+    is split by the share of its steps done by that stage. Each run had one CPU thread, with 11 runs at once.
+
+Terms used below
+- return: a model's mean over the 300 test landings, averaged over the 3 seeds.
+- landed %: the share of test landings where the lander came to rest.
+- high lr: 1e-3 or 3e-3. Low lr: 1e-4 or 3e-4.
+- the unstable PPO corner: PPO with lr 1e-3 or 3e-3 on a 64x64 or 256x256 network. That's 4 settings and
+  72 models.
+
+
+IN SHORT
+--------
+- Point 1 is mostly produced by the unstable PPO corner. Without it, training episodes explain 49% of the
+  spread between models, and settings combined only 15%.
+- Point 2 holds for heavy wind, but low gravity goes the other way.
+- Points 3 and 4 are right about PPO. The rule is a cut-off rather than a match of lr to size, and the
+  "most efficient" claim depends on what efficiency means.
+- In point 5, "definitely" is too strong: the best PPO setting only ties the average SAC.
+- The notes don't yet answer the second half of the study question: where performance drops off.
+
+
+1) "What mattered most is the combined effect of the settings"
+--------------------------------------------------------------
+Partly right, but misleading.
+
+The 45% "settings combined" share comes mostly from the unstable PPO corner. Those 4 settings are only 17%
+of the models, but they also cause 72% of the "seed (luck)" share. The same analysis without them:
+
+                         All 432 models    Without the unstable corner (360)
+  training episodes           12%                    49%
+  network size                 1%                    10%
+  algorithm                   12%                     7%
+  learning rate                7%                     0.4%
+  settings combined           45%                    15%
+  seed (luck)                 23%                    18%
+
+"Settings combined" adds up 7 combination bars, so ranking it against single settings isn't a fair
+comparison.
+
+Suggested wording: "Training episodes matter most. The settings only interact strongly in one corner: PPO
+with lr 1e-3 or higher on a 64x64 or 256x256 network becomes unstable. That corner produces most of the
+'combined' share and most of the seed luck."
+
+
+2) "Adverse conditions reward the correct algorithm and training episodes above all else"
+-----------------------------------------------------------------------------------------
+This holds for heavy wind only.
+
+Heavy wind supports it.
+- The algorithm's share rises from 9% (ideal) to 17%.
+- The gap in landed % between the best PPO setting (256x256, lr 1e-4) and SAC 64x64/256x256 at 4000
+  episodes grows from 6 points in ideal (93% vs 99%) to 15 points in heavy wind (81% vs 96%).
+
+Low gravity goes the other way.
+- The training-episodes share falls to 4%, and seed luck rises to 29%.
+- The best PPO setting lands 74% of the time here, and SAC 64x64/256x256 lands 73%: the gap disappears.
+- SAC runs out of time while hovering in 16% of its low-gravity landings.
+- Extra training helps less: from 125 to 4000 episodes SAC gains 201 points here, against 263 in ideal.
+
+Heavy gravity looks just like ideal (algorithm 9%, training episodes 15%). It isn't really adverse:
+training gravity goes down to -11.9, and 14% of training landings fall between -11 and -11.9.
+
+"Above all else" doesn't hold: in every column, settings combined and seed luck are bigger than both the
+algorithm and training episodes.
+
+Comparing shares across columns is risky. Each share is a fraction of that condition's own spread, and low
+gravity's spread is about twice the others' (variance 106k against roughly 50k). Compare returns or
+landed % instead.
+
+Suggested wording: "Heavy wind is where SAC's lead grows. Low gravity, which training never sees, is the
+hardest condition for every model, and extra training helps least there."
+
+
+3) Learning rate per network size
+---------------------------------
+PPO 16x16, "high lr works well with a small network":
+- High lr learns faster: at 500 episodes lr 1e-3 is at 126 and lr 1e-4 at -277.
+- By 4000 episodes all four lrs sit between 112 and 161, and their seeds overlap (lr 1e-3: 153 to 172,
+  lr 1e-4: 88 to 169). The final order is within luck.
+- PPO 16x16 never reaches 200 at any lr.
+
+PPO 64x64, "low to medium lr works well":
+- Low lr wins. lr 1e-4 reaches 209 and is the only 64x64 setting to cross 200. lr 3e-4, SB3's default,
+  reaches 175.
+- lr 1e-3 peaks at 136 at 1000 episodes, then sinks to 83.
+
+PPO 256x256, "low lr works best": correct. lr 1e-4 reaches 220 and lr 3e-4 reaches 212.
+
+A sharper PPO rule: it's a cut-off, not a gradual match of lr to size. lr 1e-3 or higher breaks PPO on any
+network bigger than 16x16, and 64x64 and 256x256 share the same safe limit of 3e-4 or lower.
+
+SAC, "models converge with episodes, no trend among lrs":
+- True for 64x64 and 256x256: at 4000 episodes every lr ends between 234 and 275.
+- Not true for 16x16. It ranges from 78 to 201 and is still improving at 4000. 38% of its training
+  landings hover until the 1000-step limit.
+- At 16x16 the seed matters more than the lr. With lr 1e-3 the three seeds end at 21, -9 and 222.
+
+
+4) Return against network size
+------------------------------
+"PPO needs a low lr if a big network is used": correct. The timing is worth adding.
+- 256x256 at lr 1e-3 looks good up to 2000 episodes: return 169, 72% landed.
+- It then collapses to -355 at 4000, with 4% landed.
+- A short test would have picked this setting. This is the drop-off the study question asks about.
+
+"Most efficient was PPO lr 1e-4 at 1000 episodes": say it's 256x256, since 16x16 at that lr and stage only
+reaches 42. Then say what "efficient" means, because the answer depends on it:
+- Per minute of CPU, it holds. It reaches 179 and lands 73% in about 17 minutes. SAC 64x64 at lr 3e-3 needs
+  about 24 minutes to reach 160 (at 250 episodes), and SAC 256x256 at lr 3e-3 about 90 minutes to reach
+  196 (at 500).
+- Per environment step, it's the other way round. PPO used 538k steps. SAC 64x64 at lr 3e-3 reached 160 in
+  120k steps and 206 in 216k.
+- Per training episode, SAC wins too. At 500 episodes SAC 64x64 at lr 3e-3 is at 206, and the best PPO
+  setting at 126.
+- The minutes are estimates (see Sources).
+
+"High lr early on may go wrong for SAC with bigger networks": this rests on one seed.
+- With SAC 256x256 at lr 3e-3, seed 1 was at -405 after 125 episodes and -563 after 250. Seeds 0 and 2
+  were at 43 and 22 after 125 episodes, and 139 and 127 after 250.
+- All three recover by 500 episodes, ending at 185 to 202.
+- On 64x64, lr 3e-3 is the best SAC setting at 250 episodes (160).
+
+Suggested wording: "High lr makes early SAC less predictable: one seed in three crashed hard, then
+recovered."
+
+
+5) "SAC is better in general, but a well-configured PPO could definitely beat the average SAC"
+----------------------------------------------------------------------------------------------
+At best a tie, so "definitely" is too strong.
+- At 4000 episodes, the best PPO setting (256x256, lr 1e-4) has return 220 and lands 85%. The average SAC
+  setting has return 218 and lands 82%.
+- SAC 16x16 drags that average down. Every SAC 64x64 and 256x256 setting beats the best PPO setting; the
+  lowest of them is at 234.
+- PPO's real advantage is time. At 4000 episodes the best PPO setting took about 54 minutes on one CPU
+  thread, against about 9 hours for SAC 256x256. SAC used half the steps (0.89M against 1.77M).
+- Per minute they're roughly even: PPO 256x256 at lr 1e-4 reaches 201 in about 34 minutes, and SAC 64x64
+  at lr 3e-3 reaches 206 in about 43 minutes.
+
+Suggested wording: "SAC beats PPO at the same number of training episodes, and only SAC 16x16 loses to a
+well-tuned PPO. PPO gets through episodes about 7 to 13 times faster, so for the same training time the
+two are roughly even."
+
+
+WHAT THE NOTES DON'T COVER YET
+------------------------------
+The drop-off half of the study question.
+- Only PPO drops off, and only in the unstable corner:
+  - 64x64 peaks at 250 episodes with lr 3e-3, and at 1000 with lr 1e-3;
+  - 256x256 at lr 1e-3 peaks at 2000;
+  - 256x256 at lr 3e-3 never learns: it ends at -968 and lands none.
+- SAC's only dips are 4 and 20 points, on 64x64 with lr 1e-3 and 3e-3 after 2000 episodes.
+- So more training never hurt SAC up to 4000 episodes. It does hurt PPO when the lr is too high.
+
+Seed luck is the biggest single bar in chart 1 (23%). With 3 seeds, differences smaller than the bands in
+chart 3 aren't reliable.
+
+Chart 5 shows different failure modes. Early SAC models run out of time while hovering (up to about 45% of
+a condition's landings). PPO models crash instead.
+
+Low gravity is the hardest condition, and the only one outside the training range. SAC lands 61% there,
+against 80-90% everywhere else, so it tests how well the models handle planets they haven't seen.
+
+The 1% for network size doesn't mean size doesn't matter.
+- Outside the unstable corner, 16x16 is the weakest network for both algorithms.
+- The share looks small because size cuts both ways: in the unstable corner a bigger network is worse,
+  and everywhere else it's better.
+- Without that corner, size explains 10%.
+
+Say which measure you're using. Ranked by landed % instead of mean return, training episodes explain 40%
+of the spread, against 12%.
+
+Give concrete values for vague words such as "high/low lr", "efficient" and "converge". Small typos:
+"generasl", "definately".

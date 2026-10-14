@@ -1,0 +1,23 @@
+my observations
+
+4)
+PPO requires a low lr if high model size is to be used
+most efficient seen was lr: 1e-4 PPO 1k episodes
+
+SAC converges regardless of lr when no of episodes >>>
+high lr in low episode SAC may err with bigger model sizes
+
+1) what mattered the most seems to be the combined effects of the chosen parameters wrt model chosen PPO/SAC lr must match model size and training episodes so that model may capture task
+
+2)adverse conditions reward  correct algo and training episodes above all else
+
+3) 
+ppo 16^2: high lr with small model size works good together
+ppo 64^2: low to medium lr with medium model size works well
+ppo 256^2: low lr with big model works best
+
+sac: models converge with episodes with no apparent trend among lrs
+
+
+5)
+sac seems to do better in generasl but a well configured ppo could definately do better than avg sac
