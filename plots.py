@@ -1,8 +1,10 @@
-"""Draws the study's charts from results/test_results.csv into plots/, and prints what matters most.
+"""Draws the study's charts from results/test_results.csv and logs/ into plots/, and prints what matters most.
 
     python plots.py    (or: python driver.py plots)
 """
+import glob
 import os
+import re
 from itertools import combinations
 
 import matplotlib
@@ -18,8 +20,10 @@ from matplotlib.patches import Patch
 
 from names import lr_tag
 from testing import CONDITIONS, SOLVED
+from trainer import MAX_STEPS
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
+RUN_NAME = re.compile(r"(ppo|sac)_lr([^_]+)_net([0-9x]+)_seed(\d+)$")  # a training log, e.g. sac_lr3e-4_net64x64_seed0
 
 # Colours checked for colour-blind safety; each learning rate also gets its own marker shape
 SURFACE, INK, INK2, GRID, AXIS = "#fcfcfb", "#0b0b0b", "#52514e", "#e1e0d9", "#c3c2b7"
@@ -69,9 +73,25 @@ def width(size):
 
 
 def per_model(results):
-    """One row per model with its mean return over the given landings."""
+    """One row per model with its mean return over the given landings, and the % of them that landed."""
     keys = ["model", "algorithm", "lr", "size", "seed", "train_episodes"]
-    return results.groupby(keys, as_index=False)["return"].mean()
+    landed = (results["outcome"] == "landed") * 100.0
+    return results.assign(landed=landed).groupby(keys, as_index=False)[["return", "landed"]].mean()
+
+
+def read_logs(root, window):
+    """Every training landing in logs/, plus the mean return and length of the last `window` landings of its run."""
+    frames = []
+    for path in sorted(glob.glob(os.path.join(root, "logs", "*.csv"))):
+        match = RUN_NAME.match(os.path.splitext(os.path.basename(path))[0])
+        if not match:
+            continue
+        algo, lr, size, seed = match.groups()
+        log = pd.read_csv(path)
+        frames.append(log.assign(algorithm=algo, lr=float(lr), size=size, seed=int(seed),
+                                 return_mean=log["return"].rolling(window).mean(),
+                                 length_mean=log["length"].rolling(window).mean()))
+    return pd.concat(frames, ignore_index=True) if frames else None
 
 
 def levels(models):
@@ -99,10 +119,11 @@ def variance_shares(models):
     return pd.Series(shares) * 100
 
 
-def solved_line(ax, label=False):
-    ax.axhline(SOLVED, color=INK2, linewidth=0.8, linestyle=(0, (4, 3)), zorder=1)
+def reference_line(ax, value, text, label=False):
+    """A dashed line such as the solved score or the time limit."""
+    ax.axhline(value, color=INK2, linewidth=0.8, linestyle=(0, (4, 3)), zorder=1)
     if label:  # in the margin to the right of the panel, where no line can run into it
-        ax.text(1.02, SOLVED, "solved", transform=ax.get_yaxis_transform(), ha="left", va="center",
+        ax.text(1.02, value, text, transform=ax.get_yaxis_transform(), ha="left", va="center",
                 fontsize=8, color=INK2)
 
 
@@ -111,10 +132,10 @@ def lr_handles(colors, lrs):
                    markeredgecolor=SURFACE, label=f"lr {lr_tag(lr)}") for lr in lrs]
 
 
-def draw_lines(ax, runs, x_column, x_values, colors, lrs):
+def draw_lines(ax, runs, x_column, x_values, colors, lrs, y="return"):
     """One line per learning rate (mean of the seeds) with a faint band from the worst to the best seed."""
     for lr in lrs:
-        stats = runs[runs["lr"] == lr].groupby(x_column)["return"].agg(["mean", "min", "max"]).reindex(x_values)
+        stats = runs[runs["lr"] == lr].groupby(x_column)[y].agg(["mean", "min", "max"]).reindex(x_values)
         if stats["mean"].isna().all():
             continue
         x = [width(v) for v in x_values] if x_column == "size" else x_values
@@ -166,8 +187,9 @@ def plot_importance_by_condition(table, path):
     plt.close(fig)
 
 
-def plot_curves(results, colors, path, title, note):
-    """Return against training episodes: one panel per algorithm and network size, one line per learning rate."""
+def plot_curves(results, colors, path, title, note, y="return"):
+    """Mean test return (y="return") or % landed (y="landed") against training episodes: one panel per algorithm
+    and network size, one line per learning rate."""
     models = per_model(results)
     algos, sizes, lrs, episodes = levels(models)
     fig, axes = plt.subplots(len(algos), len(sizes), figsize=(3.2 * len(sizes) + 0.8, 2.5 * len(algos) + 1.8),
@@ -175,9 +197,10 @@ def plot_curves(results, colors, path, title, note):
     for r, algo in enumerate(algos):
         for c, size in enumerate(sizes):
             ax = axes[r][c]
-            solved_line(ax, label=(r == 0 and c == len(sizes) - 1))
+            if y == "return":
+                reference_line(ax, SOLVED, "solved", label=(r == 0 and c == len(sizes) - 1))
             runs = models[(models["algorithm"] == algo) & (models["size"] == size)]
-            draw_lines(ax, runs, "train_episodes", episodes, colors, lrs)
+            draw_lines(ax, runs, "train_episodes", episodes, colors, lrs, y)
             ax.set_xscale("log", base=2)
             ax.set_xticks(episodes, [short(e) for e in episodes])
             ax.minorticks_off()
@@ -185,7 +208,9 @@ def plot_curves(results, colors, path, title, note):
             if r == len(algos) - 1:
                 ax.set_xlabel("training episodes")
             if c == 0:
-                ax.set_ylabel("mean test return")
+                ax.set_ylabel("mean test return" if y == "return" else "% of test landings that landed")
+    if y == "landed":
+        axes[0][0].set_ylim(0, 100)  # the panels share the y axis
     header(fig, title, note, lr_handles(colors, lrs))
     fig.savefig(path)
     plt.close(fig)
@@ -200,7 +225,7 @@ def plot_sizes(results, colors, path):
     for r, algo in enumerate(algos):
         for c, stage in enumerate(episodes):
             ax = axes[r][c]
-            solved_line(ax, label=(r == 0 and c == len(episodes) - 1))
+            reference_line(ax, SOLVED, "solved", label=(r == 0 and c == len(episodes) - 1))
             runs = models[(models["algorithm"] == algo) & (models["train_episodes"] == stage)]
             draw_lines(ax, runs, "size", sizes, colors, lrs)
             ax.set_xscale("log", base=2)
@@ -248,6 +273,48 @@ def plot_outcomes(results, path):
     header(fig, "How the test landings ended",
            "All learning rates, network sizes and seeds together. Bars stack from the bottom in legend order.",
            handles)
+    fig.savefig(path)
+    plt.close(fig)
+
+
+def plot_training(logs, y, colors, episodes, path, title, note):
+    """Training return (y="return") or steps per landing (y="length") against training episodes, from logs/: one
+    panel per algorithm and network size, one line per learning rate (mean of the seeds) with a faint band from the
+    worst to the best seed. Markers sit at the stages, so each learning rate keeps its marker shape."""
+    algos = [algo for algo in ["ppo", "sac"] if algo in set(logs["algorithm"])]
+    sizes = sorted(logs["size"].unique(), key=width)
+    lrs = sorted(logs["lr"].unique())
+    fig, axes = plt.subplots(len(algos), len(sizes), figsize=(3.2 * len(sizes) + 0.8, 2.5 * len(algos) + 1.8),
+                             sharex=True, sharey=True, squeeze=False)
+    for r, algo in enumerate(algos):
+        for c, size in enumerate(sizes):
+            ax = axes[r][c]
+            label = r == 0 and c == len(sizes) - 1
+            if y == "return":
+                reference_line(ax, SOLVED, "solved", label)
+            else:
+                reference_line(ax, MAX_STEPS, "time limit", label)
+            runs = logs[(logs["algorithm"] == algo) & (logs["size"] == size)]
+            for lr in lrs:
+                stats = runs[runs["lr"] == lr].groupby("episode")[f"{y}_mean"].agg(["mean", "min", "max"]).dropna()
+                if stats.empty:
+                    continue
+                color, marker = colors[lr]
+                ax.fill_between(stats.index, stats["min"], stats["max"], color=color, alpha=0.1, linewidth=0)
+                ax.plot(stats.index, stats["mean"], color=color, linewidth=1.6, marker=marker, markersize=5,
+                        markevery=[stats.index.get_loc(e) for e in episodes if e in stats.index],
+                        markeredgecolor=SURFACE, markeredgewidth=1)
+            ax.set_xscale("log", base=2)
+            ax.set_xticks(episodes, [short(e) for e in episodes])
+            ax.minorticks_off()
+            ax.set_title(f"{algo.upper()}, {size} network", loc="left")
+            if r == len(algos) - 1:
+                ax.set_xlabel("training episodes")
+            if c == 0:
+                ax.set_ylabel("training return" if y == "return" else "steps per training landing")
+    if y == "length":
+        axes[0][0].set_ylim(0, MAX_STEPS * 1.05)  # the panels share the y axis
+    header(fig, title, note, lr_handles(colors, lrs))
     fig.savefig(path)
     plt.close(fig)
 
@@ -304,6 +371,26 @@ def make_plots(root=ROOT):
                     f"Test return against training episodes: {condition.replace('_', ' ')}",
                     f"Mean over this condition's {subset.groupby('model').size().iloc[0]} test landings. "
                     "Line: mean of the seeds. Band: worst to best seed.")
+    plot_curves(results, colors, os.path.join(folder, "6_landed_vs_episodes.png"),
+                "Landing success rate against training episodes",
+                f"Share of all {landings} test landings that came to rest. Line: mean of the seeds. "
+                "Band: worst to best seed.", y="landed")
+
+    episodes = levels(models)[3]
+    window = min(100, episodes[0])
+    logs = read_logs(root, window)
+    if logs is None:
+        print(f"No training logs in {os.path.join(root, 'logs')}, so charts 7 and 8 are skipped")
+    else:
+        logs = logs[logs["lr"].isin(colors)]
+        planets = "Training landings: a new random planet each time, with exploration on."
+        points = (f"Each point is the mean of the last {window} landings. "
+                  "Line: mean of the seeds. Band: worst to best seed.")
+        plot_training(logs, "return", colors, episodes, os.path.join(folder, "7_training_return.png"),
+                      "Training return against training episodes", f"{planets}\n{points}")
+        plot_training(logs, "length", colors, episodes, os.path.join(folder, "8_training_steps.png"),
+                      "Steps per training landing against training episodes",
+                      f"{planets} {MAX_STEPS} steps means it ran out of time.\n{points}")
 
     peak_table = peaks(models)
     peak_table.to_csv(os.path.join(root, "results", "peaks.csv"), index=False)
