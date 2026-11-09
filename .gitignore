@@ -5,3 +5,8 @@ resources/
 logs/
 *.zip
 *.pkl
+
+# only README.md is tracked as markdown; other .md files stay local
+*.md
+!README.md
+

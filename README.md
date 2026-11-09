@@ -7,6 +7,34 @@ matters most, and where performance drops off.
 The study is finished: all 432 models are trained, tested and charted, and the write-up is
 `submit/LAB CA-Report.pdf`.
 
+## Architecture
+
+```
+LunarLanderContinuous-v3 (Box2D)
+   + GaussPlanetWrapper (random gravity / wind / turbulence per landing)
+        -> Stable-Baselines3 PPO or SAC (PyTorch, 1 thread per worker)
+        -> weights saved at 6 stages (125 ... 4000 episodes) -> 432 models
+        -> batched testing on 300 fixed planets (6 conditions x 50)
+        -> results/*.csv -> plots/ -> submit/ report
+```
+
+## Hardware constraints
+
+Built and run on one Windows 11 laptop: i5-12450H (8 cores, 12 threads), 16 GB RAM and an
+RTX 3050 6GB Laptop GPU. The whole study (72 runs, 271 run-hours) trains on 11 CPU threads at once,
+within 16 GB of RAM (about 0.6-0.7 GB per SAC run). The 6 GB GPU is supported (SAC 256x256 can use it),
+but under full load it was no faster than a CPU thread, so the study ran on the CPU.
+
+## Quick run (3 steps)
+
+```
+pip install torch==2.11.0 --index-url https://download.pytorch.org/whl/cu128
+pip install stable-baselines3==2.8.0 "gymnasium[box2d]==1.2.3" "numpy~=2.4.0" pandas==3.0.2 matplotlib==3.10.8
+python driver.py train --quick && python driver.py test --quick --log && python driver.py plots --quick
+```
+
+The full setup and the full 28-hour run are described below.
+
 ## The study
 
 | Setting | Values |
