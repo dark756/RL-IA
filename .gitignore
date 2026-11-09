@@ -9,4 +9,3 @@ logs/
 # only README.md is tracked as markdown; other .md files stay local
 *.md
 !README.md
-
